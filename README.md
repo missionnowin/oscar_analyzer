@@ -64,23 +64,26 @@ This framework analyzes UrQMD (Ultra-Relativistic Quantum Molecular Dynamics) co
 ```
 .
 ├── run_all_analysis.py           # Main entry point (parallel pipeline)
-├── detect_cumulative.py          # Single-file analysis tool
-├── verify_data_integrity.py      # Data validation utility
-│
-├── cumulative_detector.py        # Core cumulative detection logic
-├── readers.py                    # Oscar format readers
-├── particle.py                   # Particle model
+├── verify_data_integrity.py      # Data validation utility                   # Oscar format readers
 │
 ├── analyzers/
-│   ├── general/
-│   │   ├── collision_analyzer.py     # Event-level kinematics
-│   │   ├── angle_analyzer.py         # Angular distributions
-│   │   ├── comparison_analyzer.py    # Modified vs. unmodified comparison
-│   │   ├── aggregate_analyzer.py     # Multi-event accumulation
-│   │   ├── collision_system_detector.py # Auto-detect Au+Au energy
+│   ├── cumulative/
+│   │   ├── detect_cumulative.py          # Single-file analysis tool
 │   │   └── cumulative_detector.py    # Cumulative signature identification
-│   └── models/
-│       └── particle.py
+│   └── general/
+│       ├── collision_analyzer.py     # Event-level kinematics
+│       ├── angle_analyzer.py         # Angular distributions
+│       ├── comparison_analyzer.py    # Modified vs. unmodified comparison
+│       ├── aggregate_analyzer.py     # Multi-event accumulation
+│       └── collision_system_detector.py # Auto-detect Au+Au energy
+│   
+├──models/
+│   ├── cumulative_signature.py
+│   └── particle.py
+│
+├── utils/
+│   ├── progress_display.py
+│   └── readers.py 
 │
 └── data/
     ├── modified/          # Cumulative effects enabled
