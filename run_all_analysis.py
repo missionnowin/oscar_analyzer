@@ -20,7 +20,7 @@ try:
     from analyzers.general.comparison_analyzer import RunComparisonAnalyzer
     from analyzers.general.collision_system_detector import CollisionSystemDetector
     from utils.readers import OscarReader
-    from utils.aggregate_analyzer import AggregateAnalyzer
+    from analyzers.general.aggregate_analyzer import AggregateAnalyzer
     from utils.progress_tracker import ProgressTracker
 except ImportError as e:
     print(f"Error importing modules: {e}")
