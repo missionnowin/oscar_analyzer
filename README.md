@@ -1,6 +1,6 @@
 # UrQMD Cumulative Effect Analysis Framework
 
-**Comprehensive analysis pipeline for detecting cumulative scattering signatures in heavy-ion collision simulations.**
+**MOST OF .MD FILES IS AI-GENERATED, I REVISED IT BUT IF THERE ANY ISSUES FEEL FREE TO OPEN ISSUE OR PR**
 
 ---
 
