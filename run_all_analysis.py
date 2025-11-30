@@ -96,7 +96,7 @@ class UnifiedAnalysisEngine:
             if len(batch) >= batch_size:
                 # Process batch
                 for event_particles in batch:
-                    aggregator.accumulate_event(event_particles, "modified" == sample_type)
+                    aggregator.accumulate_event(event_particles)
                 total_events += len(batch)
                 batch = []
                 
@@ -106,7 +106,7 @@ class UnifiedAnalysisEngine:
         
         # Process remaining events
         for event_particles in batch:
-            aggregator.accumulate_event(event_particles, "modified" == sample_type)
+            aggregator.accumulate_event(event_particles)
         total_events += len(batch)
         
         return aggregator, first_event, total_events, system_info
@@ -213,42 +213,6 @@ class UnifiedAnalysisEngine:
                 comparison_plots = comparator.generate_all_comparisons(out_dir_cmp)
                 result['plots_generated'].extend([f"comparisons/{run_name}/{p}" for p in comparison_plots])
                 report_progress("Comparing", "✓ done")
-
-            report_progress(
-                "Cumulative analysis",
-                "Comparing modified vs unmodified particles..."
-            )
-
-            cum_result = agg_mod.get_cumulative_statistics(agg_unm.particles_unmodified)
-
-            result["cumulative_analysis"] = cum_result
-
-            if cum_result.get("n_signatures", 0) > 0:
-                report_progress(
-                    "Cumulative analysis",
-                    f"✓ {cum_result['n_signatures']} signatures found, "
-                    f"likelihood={cum_result['likelihood']:.3f}"
-                )
-            else:
-                report_progress("Cumulative analysis", "No cumulative signatures detected")
-
-            result["cumulative_analysis"] = cum_result
-
-            if cum_result.get("n_signatures", 0) > 0:
-                report_progress(
-                    "Cumulative analysis",
-                    f"✓ {cum_result['n_signatures']} signatures found, "
-                    f"likelihood={cum_result['likelihood']:.3f}"
-                )
-            else:
-                report_progress("Cumulative analysis", "No cumulative signatures detected")
-
-            # Generate plots
-            try:
-                cum_plots = agg_mod.plot_cumulative_summary(results_root / run_name / "cumulative", agg_unm.particles_unmodified)
-                result["cumulative_plots"] = cum_plots
-            except Exception as e:
-                print(f"[WARNING] Cumulative plotting failed: {e}")
             
             # Clean up
             import gc

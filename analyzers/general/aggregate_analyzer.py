@@ -69,9 +69,6 @@ class AggregateAnalyzer:
         self.n_events = 0
         self.n_total_particles = 0
 
-        self.particles_modified = []     
-        self.particles_unmodified = []  
-
     def _ensure_capacity(self, required_size: int) -> None:
         """Grow arrays if capacity exceeded."""
         if required_size > self._capacity:
@@ -84,17 +81,12 @@ class AggregateAnalyzer:
             self._capacity = new_capacity
     
 
-    def accumulate_event(self, particles: List[Particle], isModified: bool) -> None:
+    def accumulate_event(self, particles: List[Particle]) -> None:
         """Add one event's particles to aggregate using in-place array operations."""
         if not particles:
             return
 
         coll = CollisionAnalyzer(particles, self.system_label)
-
-        if isModified:
-            self.particles_modified.extend(particles) 
-        else:
-            self.particles_unmodified.extend(particles) 
 
         # Get values and ensure float32 dtype
         pt_vals = coll.pt.astype(np.float32)
@@ -329,138 +321,6 @@ class AggregateAnalyzer:
             print(f"[ERROR] η vs φ plot failed: {e}")
 
         return plots
-
-
-    def detect_cumulative_effects(
-        self,
-        particles_unmodified: Optional[List[Particle]] = None
-    ) -> Dict:
-        """Detect cumulative effects by comparing modified vs unmodified particles
-        
-        Should be called AFTER accumulate_event() for all events.
-        Uses particles already accumulated in self.particles_modified.
-        """
-        if not self.particles_modified:
-            return {
-                "likelihood": 0.0,
-                "n_signatures": 0,
-                "signatures": [],
-                "error": "No particles to analyze"
-            }
-        
-        try:
-            from analyzers.cumulative.cumulative_detector import CumulativeEffectDetector
-        except ImportError as e:
-            return {
-                "likelihood": 0.0,
-                "n_signatures": 0,
-                "signatures": [],
-                "error": f"Cannot import CumulativeEffectDetector: {e}"
-            }
-        
-        detector = CumulativeEffectDetector(
-            particles_modified=self.particles_modified,
-            particles_unmodified=particles_unmodified or []
-        )
-        
-        detector.detect_all_signatures()
-        cum_likelihood = float(detector.get_cumulative_likelihood())
-        
-        # Extract data BEFORE deleting detector
-        n_signatures = len(detector.signatures)
-        n_particles_mod = len(self.particles_modified)
-        n_particles_unm = len(particles_unmodified) if particles_unmodified else 0
-        
-        signatures_list = [
-            {
-                "type": sig.signature_type,
-                "strength": float(sig.strength),
-                "confidence": float(sig.confidence),
-                "affected_particles": int(sig.affected_particles),
-                "description": sig.description,
-            }
-            for sig in detector.signatures
-        ]
-        
-        # Safe to delete now
-        del detector
-        import gc
-        gc.collect()
-        
-        # Build result using extracted variables
-        result = {
-            "likelihood": cum_likelihood,
-            "n_signatures": n_signatures,
-            "n_particles_mod": n_particles_mod,
-            "n_particles_unm": n_particles_unm,
-            "signatures": signatures_list,
-        }
-        
-        return result
-
-
-    def plot_cumulative_summary(
-        self,
-        output_dir,
-        particles_unmodified: Optional[List[Particle]] = None
-    ) -> List[str]:
-        """Generate cumulative analysis plots
-        
-        Args:
-            output_dir: Directory to save plots
-            particles_unmodified: Optional unmodified particles for comparison
-            
-        Returns:
-            List of generated plot filenames
-        """
-        plots = []
-        
-        if not self.particles_modified:
-            return plots
-        
-        try:
-            from analyzers.cumulative.cumulative_detector import CumulativeEffectDetector
-        except ImportError:
-            return plots
-        
-        detector = CumulativeEffectDetector(
-            particles_modified=self.particles_modified or [],
-            particles_unmodified=particles_unmodified or []
-        )
-        detector.detect_all_signatures()
-        
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            summary_file = output_dir / "cumulative_summary.png"
-            detector.plot_cumulative_summary(out=str(summary_file))
-            plots.append("cumulative_summary.png")
-        except Exception as e:
-            print(f"[ERROR] Cumulative summary plot failed: {e}")
-        
-        try:
-            candidates_file = output_dir / "cumulative_candidates.png"
-            detector.plot_cumulative_candidates(out=str(candidates_file))
-            plots.append("cumulative_candidates.png")
-        except Exception as e:
-            print(f"[ERROR] Cumulative candidates plot failed: {e}")
-        
-        # Safe cleanup after all plots done
-        del detector
-        import gc
-        gc.collect()
-        
-        return plots
-
-
-    def get_cumulative_statistics(
-        self,
-        particles_unmodified: Optional[List[Particle]] = None
-    ) -> Dict:
-        """Get comprehensive cumulative effect statistics
-        
-        Returns dict with all cumulative analysis metrics
-        """
-        return self.detect_cumulative_effects(particles_unmodified)
 
 
     def clear_cache(self):
