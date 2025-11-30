@@ -1,17 +1,9 @@
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
-import argparse
-from typing import List, Tuple, Optional, Dict
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing as mp
-from functools import partial
-import time
-import json
+from typing import List, Tuple, Optional
 
 try:
-    from utils.readers import OscarFormat, OscarReader
     from models.particle import Particle
 except ImportError as e:
     print(f"Error importing modules: {e}")
