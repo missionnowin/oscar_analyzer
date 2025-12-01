@@ -36,7 +36,7 @@ class UnifiedAnalysisEngine:
     """
     
     def __init__(self, data_root: Path, results_root: Path, run_mode: str = "comparison", 
-                 file_format: str = 'oscar', n_workers: Optional[int] = None, batch_size: int = 50):
+                 file_format: str = 'oscar', n_workers: Optional[int] = None, batch_size: int = 500):
         self.data_root = Path(data_root)
         self.results_root = Path(results_root)
         self.run_mode = run_mode  # 'comparison' or 'single'
