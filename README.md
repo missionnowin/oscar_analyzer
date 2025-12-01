@@ -1,10 +1,10 @@
 # High-Energy Physics Collision Analysis Pipeline
 
-Analysis framework for nuclear collisions using Oscar format event generators.
+Analysis framework for nuclear collisions using Oscar, HepMC and PHQMD formats.
 
 ## Overview
 
-This project analyzes modified vs. unmodified particle collision events to identify and quantify cumulative scattering signatures. It processes Oscar format output files (Oscar1992A and OSC1997A) in parallel, extracts physics observables, and generates publication-quality comparisons.
+This project analyzes modified vs. unmodified particle collision events to identify and quantify cumulative scattering signatures. It processes Oscar format output files (Oscar1992A and OSC1997A), .dat for PHQMD and HepMC in parallel, extracts physics observables, and generates publication-quality comparisons.
 
 ### Key Features
 
@@ -438,20 +438,8 @@ pip install numpy matplotlib
 ---
 
 ## Future Extensions
-
-- Support for arbitrary file formats (HepMC, ROOT)
 - Advanced signature classification (ML-based)
 - Correlation analysis across runs
-- Real-time visualization server
-- Batch submission to HPC clusters
-
----
-
-## References
-
-- Oscar format specifications: https://github.com/smash-transport/smash/wiki/Oscar-Format
-- RHIC Beam Energy Scan: https://www.bnl.gov/bes/
-- Cumulative effects in QCD: High Energy Physics literature
 
 ---
 
@@ -460,8 +448,6 @@ pip install numpy matplotlib
 Open source for research use. Please cite if used in published work.
 
 ---
-
-## Contact & Support
 
 For questions about physics interpretation or technical issues:
 - Check `run_all_analysis.py` for detailed analysis pipeline
