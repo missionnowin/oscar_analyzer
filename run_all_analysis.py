@@ -23,12 +23,95 @@ except ImportError as e:
 
 
 class UnifiedAnalysisEngine:
-    def __init__(self, data_root: Path, results_root: Path, n_workers: Optional[int] = None, batch_size: int = 500):
+    """
+    Main analysis engine for collision data.
+    
+    Features:
+    - Dual mode: comparison (modified/unmodified) or single (single files)
+    - Batch streaming to minimize memory footprint
+    - Parallel processing with ProcessPoolExecutor
+    - Thread-safe matplotlib memory management
+    - Automatic cleanup after each phase
+    """
+    
+    def __init__(self, data_root: Path, results_root: Path, run_mode: str = "comparison", 
+                 n_workers: Optional[int] = None, batch_size: int = 50):
         self.data_root = Path(data_root)
         self.results_root = Path(results_root)
+        self.run_mode = run_mode  # 'comparison' or 'single'
         self.n_workers = n_workers or mp.cpu_count()
         self.batch_size = batch_size
 
+    def _process_single_file(
+        self,
+        file_path: Path,
+        run_name: str,
+        batch_size: int,
+        system_info: Dict = None,
+        progress_callback=None,
+    ) -> Tuple:
+        """
+        Process a single file for analysis.
+        
+        Returns:
+            Tuple of (agg, cumulative_analyzer, cumulative_signatures, total_events, system_info)
+        """
+        # Detect collision system from file if not provided
+        if system_info is None:
+            system_info = CollisionSystemDetector.detect_from_file(
+                str(file_path), n_events_sample=10
+            )
+            if not system_info:
+                system_info = {}
+        
+        # Initialize aggregator
+        agg = AggregateAnalyzer(
+            system_label=system_info.get('label'),
+            sqrt_s_NN=system_info.get('sqrt_s_NN'),
+            A1=system_info.get('A1'),
+            Z1=system_info.get('Z1'),
+            A2=system_info.get('A2'),
+            Z2=system_info.get('Z2')
+        )
+        
+        cumulative_analyzer = CumulativeAnalyzer(
+            threshold_strength=0.01,       # 1% excess = 1% flucton fraction
+            threshold_confidence=0.05,     # Moderate confidence for subtle effects
+            threshold_absolute_excess=0    # Disabled - works with any dataset size
+        )
+        
+        # Stream batches from file
+        reader = OscarReader(str(file_path))
+        
+        total_events = 0
+        
+        # Process batches: loads exactly batch_size events into memory
+        for batch in reader.stream_batch(batch_size):
+            # Accumulate statistics
+            for event_particles in batch:
+                agg.accumulate_event(event_particles)
+            
+            # Analyze cumulative effects
+            cumulative_analyzer.process_batch(batch, [])
+            
+            total_events += len(batch)
+            
+            # Clear batch from memory immediately
+            batch.clear()
+            gc.collect()
+            
+            if progress_callback:
+                progress_callback(f"Processed {total_events:6d} events")
+        
+        cumulative_signatures = cumulative_analyzer.get_signatures()
+        
+        if progress_callback:
+            progress_callback(
+                f"Completed: {total_events:6d} events, "
+                f"{len(cumulative_signatures)} signatures detected"
+            )
+        
+        return (agg, cumulative_analyzer, cumulative_signatures, total_events, system_info)
 
     def _process_files_parallel(
         self,
@@ -39,6 +122,12 @@ class UnifiedAnalysisEngine:
         system_info: Dict = None,
         progress_callback=None,
     ) -> Tuple:
+        """
+        Process modified and unmodified files in parallel batches (comparison mode).
+        
+        Returns:
+            Tuple of (agg_mod, agg_unm, cumulative_analyzer, cumulative_signatures, total_events, system_info)
+        """
         # Detect collision system from file if not provided
         if system_info is None:
             system_info = CollisionSystemDetector.detect_from_file(
@@ -66,7 +155,12 @@ class UnifiedAnalysisEngine:
             Z2=system_info.get('Z2')
         )
         
-        cumulative_analyzer = CumulativeAnalyzer()
+        # TUNED FOR 1% FLUCTON FRACTION
+        cumulative_analyzer = CumulativeAnalyzer(
+            threshold_strength=0.01,       # 1% excess = 1% flucton fraction
+            threshold_confidence=0.05,     # Moderate confidence for subtle effects
+            threshold_absolute_excess=0    # Disabled - works with any dataset size
+        )
         
         # Stream batches from both files
         reader_mod = OscarReader(str(file_mod))
@@ -109,9 +203,8 @@ class UnifiedAnalysisEngine:
         
         return (agg_mod, agg_unm, cumulative_analyzer, cumulative_signatures, total_events, system_info)
 
-
     @staticmethod
-    def _analyze_single_run(
+    def _analyze_single_run_comparison(
         run_num: int,
         data_root: Path,
         results_root: Path,
@@ -121,7 +214,7 @@ class UnifiedAnalysisEngine:
         states=None,
         total=None
     ) -> Dict:
-
+        """Analyze a single run in comparison mode (modified vs unmodified)."""
         run_name = f"run_{run_num}"
         mod_file = data_root / "modified" / f"{run_name}.f19"
         unm_file = data_root / "no_modified" / f"{run_name}.f19"
@@ -142,16 +235,16 @@ class UnifiedAnalysisEngine:
             
             if not mod_file.exists():
                 result['error'] = f"Modified file not found: {mod_file}"
-                report_progress("FAILED", "File not found")
+                report_progress("FAILED", f"File not found {mod_file}")
                 return result
             
             if not unm_file.exists():
                 result['error'] = f"Unmodified file not found: {unm_file}"
-                report_progress("FAILED", "File not found")
+                report_progress("FAILED", f"File not found: {unm_file}")
                 return result
             
             # Process files with batch streaming
-            engine = UnifiedAnalysisEngine(data_root, results_root, batch_size=batch_size)
+            engine = UnifiedAnalysisEngine(data_root, results_root, run_mode="comparison", batch_size=batch_size)
             
             agg_mod, agg_unm, cumulative_analyzer, cumulative_sigs, n_events, system_info = \
                 engine._process_files_parallel(
@@ -166,48 +259,45 @@ class UnifiedAnalysisEngine:
                 return result
             
             report_progress("Analyzing", f"{n_events:,d} event pairs")
-            # Generate plots for modified dataset
+            
+            # 1. Process Modified (Plot, Stats, then DELETE)
             report_progress("Plotting modified", "Generating...")
             out_dir_mod = results_root / "modified" / run_name
             out_dir_mod.mkdir(parents=True, exist_ok=True)
             agg_mod.plot_distributions(out_dir_mod)
             stats_mod = agg_mod.get_statistics()
-            
             del agg_mod
             gc.collect()
             report_progress("Plotting modified", "done")
 
-            # Process Unmodified
+            # 2. Process Unmodified (Plot, Stats, then DELETE)
             report_progress("Plotting unmodified", "Generating...")
             out_dir_unm = results_root / "unmodified" / run_name
             out_dir_unm.mkdir(parents=True, exist_ok=True)
             agg_unm.plot_distributions(out_dir_unm)
             stats_unm = agg_unm.get_statistics()
-
             del agg_unm
             gc.collect()
             report_progress("Plotting unmodified", "done")
 
-            # Plot cumulative analysis results
+            # 3. Plot cumulative analysis
             report_progress("Plotting cumulative", "Generating...")
             out_dir_cum = results_root / "cumulative" / run_name
             out_dir_cum.mkdir(parents=True, exist_ok=True)
             cumulative_analyzer.plot_distributions(out_dir_cum)
             report_progress("Plotting cumulative", "done")
 
-            # Compare (Using only lightweight stats)
+            # 4. Compare
             report_progress("Comparing", "Generating...")
             comparator = RunComparisonAnalyzer(stats_mod, stats_unm, run_name)
             out_dir_cmp = results_root / "comparisons" / run_name
             out_dir_cmp.mkdir(parents=True, exist_ok=True)
             comparator.generate_all_comparisons(out_dir_cmp)
-            
-            # Free comparator
             del comparator
             gc.collect()
             report_progress("Comparing", "done")
 
-            # Save analysis results to JSON
+            # Save results to JSON
             report_progress("Saving", "Writing cumulative analysis...")
             
             cumulative_signatures = [
@@ -249,14 +339,7 @@ class UnifiedAnalysisEngine:
                 }, f, indent=2, default=str)
             
             report_progress("Saving", "done")
-
-            # Clean up remaining objects
-            del cumulative_sigs
-            del cumulative_signatures
-            del cumulative_analysis
-            del cumulative_analyzer
-            del stats_mod
-            del stats_unm
+            del cumulative_sigs, cumulative_signatures, cumulative_analysis, cumulative_analyzer, stats_mod, stats_unm
             gc.collect()
 
             result['success'] = True
@@ -271,10 +354,100 @@ class UnifiedAnalysisEngine:
 
         return result
 
+    @staticmethod
+    def _analyze_single_run_single(
+        run_num: int,
+        data_root: Path,
+        results_root: Path,
+        batch_size: int,
+        progress_callback=None,
+        lock=None,
+        states=None,
+        total=None
+    ) -> Dict:
+        """Analyze a single run in single mode (single file distributions only)."""
+        run_name = f"run_{run_num}"
+        file_path = data_root / "no_modified" / f"{run_name}.f19"
+
+        def report_progress(action: str, progress: str = ""):
+            if progress_callback:
+                progress_callback(run_num, action, progress, lock, states, total)
+
+        result = {
+            'run_num': run_num,
+            'run_name': run_name,
+            'success': False,
+            'error': None,
+        }
+
+        try:
+            report_progress("Processing", "Reading file...")
+            
+            if not file_path.exists():
+                result['error'] = f"File not found: {file_path}"
+                report_progress("FAILED", f"File not found {file_path}")
+                return result
+            
+            # Process file
+            engine = UnifiedAnalysisEngine(data_root, results_root, run_mode="single", batch_size=batch_size)
+            
+            agg, cumulative_analyzer, cumulative_sigs, n_events, system_info = \
+                engine._process_single_file(
+                    file_path, run_name, batch_size,
+                    system_info=None,
+                    progress_callback=lambda d: report_progress("Processing", d)
+                )
+            
+            if n_events == 0:
+                result['error'] = "No events found"
+                report_progress("FAILED", "No events")
+                return result
+            
+            report_progress("Analyzing", f"{n_events:,d} events")
+            
+            # Plot distributions
+            report_progress("Plotting", "Generating...")
+            out_dir = results_root / "distributions" / run_name
+            out_dir.mkdir(parents=True, exist_ok=True)
+            agg.plot_distributions(out_dir)
+            stats = agg.get_statistics()
+            del agg
+            gc.collect()
+            report_progress("Plotting", "done")
+            
+            # Save statistics
+            stats_json_path = results_root / "stats" / f"{run_name}_stats.json"
+            stats_json_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(stats_json_path, 'w') as f:
+                json.dump({
+                    'run_name': run_name,
+                    'total_events': int(n_events),
+                    'statistics': stats,
+                    'cumulative': cumulative_analyzer.get_statistics()
+                }, f, indent=2, default=str)
+            
+            report_progress("Saving", "done")
+            del cumulative_sigs, cumulative_signatures, cumulative_analysis, cumulative_analyzer, stats
+            gc.collect()
+
+            result['success'] = True
+            result['system_info'] = system_info
+            report_progress("COMPLETED", f"{system_info.get('label', 'Unknown')}")
+
+        except Exception as e:
+            result['error'] = str(e)
+            import traceback
+            result['traceback'] = traceback.format_exc()
+            report_progress("FAILED", str(e)[:50])
+
+        return result
 
     def run_parallel(self, runs: List[int]) -> None:
+        """Execute analysis on multiple runs in parallel."""
         print(f"\n{'='*80}")
         print("UNIFIED COLLISION ANALYSIS PIPELINE")
+        print(f"Mode: {self.run_mode.upper()}")
         print(f"{'='*80}")
         print(f"Runs: {runs} | Workers: {self.n_workers} | Batch size: {self.batch_size}\n")
 
@@ -284,12 +457,15 @@ class UnifiedAnalysisEngine:
         successful = 0
         failed = 0
         
+        # Select appropriate analysis function based on run mode
+        analyze_func = self._analyze_single_run_single if self.run_mode == "single" else self._analyze_single_run_comparison
+        
         # Process runs in parallel
         with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
             futures = {}
             for run_num in runs:
                 future = executor.submit(
-                    self._analyze_single_run,
+                    analyze_func,
                     run_num,
                     self.data_root,
                     self.results_root,
@@ -318,6 +494,7 @@ class UnifiedAnalysisEngine:
         print(f"\nSuccessful: {successful}, Failed: {failed}")
 
     def save_summary_json(self) -> Path:
+        """Generate cross-run summary statistics."""
         summary_path = self.results_root / "analysis_summary.json"
         cumulative_dir = self.results_root / "cumulative"
         
@@ -360,12 +537,13 @@ class UnifiedAnalysisEngine:
         
         summary = {
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'mode': self.run_mode,
             'total_events_analyzed': total_events,
             'total_signatures_detected': total_signatures,
             'signature_types': signature_types,
             'average_signature_strength': round(avg_strength, 3),
             'average_signature_confidence': round(avg_confidence, 3),
-            'run_summaries': run_summaries
+            'run_summaries': run_summaries,
         }
         
         with open(summary_path, 'w') as f:
@@ -374,8 +552,8 @@ class UnifiedAnalysisEngine:
         print(f"Summary: {summary_path}")
         return summary_path
 
-
     def create_cross_run_comparison_plots(self) -> List[Path]:
+        """Generate cross-run comparison plots."""
         plot_paths = []
         cumulative_dir = self.results_root / "cumulative"
         if not cumulative_dir.exists():
@@ -404,31 +582,41 @@ class UnifiedAnalysisEngine:
             cross_run_dir.mkdir(parents=True, exist_ok=True)
             
             fig, ax = plt.subplots(figsize=(10, 6))
-            ax.bar(run_numbers, signatures, alpha=0.7, color='steelblue')
-            ax.set_xlabel('Run Number')
-            ax.set_ylabel('Cumulative Signatures')
-            ax.set_title('Cumulative Signatures Across Runs')
-            ax.grid(True, alpha=0.3)
+            ax.bar(run_numbers, signatures, alpha=0.7, color='steelblue', edgecolor='black')
+            ax.set_xlabel('Run Number', fontsize=12)
+            ax.set_ylabel('Cumulative Signatures', fontsize=12)
+            title = 'Cumulative Signatures Across Runs'
+            ax.set_title(title, fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='y')
             plot_path = cross_run_dir / "signatures_per_run.png"
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-            plt.close()
+            plt.close(fig)
             plot_paths.append(plot_path)
-            print(f"Plot: {plot_path.name}")
+            print(f"Cross-run plot: {plot_path.name}")
         except Exception as e:
-            print(f"Error creating plots: {e}")
+            print(f"Error creating cross-run plots: {e}")
         
         return plot_paths
-    
 
     def generate_report(self) -> Path:
+        """Generate comprehensive analysis report."""
         report_path = self.results_root / "ANALYSIS_REPORT.txt"
         cumulative_dir = self.results_root / "cumulative"
         
         with open(report_path, 'w') as f:
             f.write("="*80 + "\n")
-            f.write("UNIFIED COLLISION ANALYSIS REPORT\n")
+            f.write(f"UNIFIED COLLISION ANALYSIS REPORT ({self.run_mode.upper()} MODE)\n")
             f.write("="*80 + "\n\n")
             f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("DETECTION THRESHOLDS:\n")
+            f.write("  threshold_strength = 0.01 (1%)\n")
+            f.write("  threshold_confidence = 0.05\n")
+            f.write("  threshold_absolute_excess = 0 (disabled)\n\n")
+            f.write("MEMORY OPTIMIZATIONS:\n")
+            f.write("  - Matplotlib backend: Agg (non-interactive)\n")
+            f.write("  - Thread-safe figure cleanup (plt.close('all'))\n")
+            f.write("  - Aggressive garbage collection enabled\n")
+            f.write("  - Batch streaming for large files\n\n")
             
             if cumulative_dir.exists():
                 f.write("PER-RUN ANALYSIS\n")
@@ -452,42 +640,42 @@ class UnifiedAnalysisEngine:
         return report_path
 
 
-def auto_detect_runs(data_root: Path) -> List[int]:
+def auto_detect_runs(data_root: Path, run_mode: str = "comparison") -> List[int]:
     """
     Auto-detect available run numbers from data directory.
-    Looks for run_N.f19 files in modified/ subdirectory.
     
     Args:
         data_root: Root data directory
+        run_mode: 'comparison' (modified/unmodified) or 'single' (single files only)
         
     Returns:
         List of run numbers found, sorted
     """
-    modified_dir = data_root / "modified"
-    
-    if not modified_dir.exists():
-        print(f"Warning: {modified_dir} not found. Using default runs [1,2,3,4,5]")
-        return [1, 2, 3, 4, 5]
-    
-    # Find all run_N.f19 files
-    run_files = sorted(modified_dir.glob("run_*.f19"))
+    if run_mode == "single":
+        # Look for run_N.f19 files directly in data_root
+        run_files = sorted(data_root.glob("run_*.f19"))
+        search_path = data_root
+    else:
+        # Look in modified/ subdirectory for comparison mode
+        modified_dir = data_root / "modified"
+        run_files = sorted(modified_dir.glob("run_*.f19")) if modified_dir.exists() else []
+        search_path = modified_dir
     
     if not run_files:
-        print(f"Warning: No run_*.f19 files found in {modified_dir}. Using default runs [1,2,3,4,5]")
+        print(f"Warning: No run_*.f19 files found in {search_path}. Using default runs [1,2,3,4,5]")
         return [1, 2, 3, 4, 5]
     
     # Extract run numbers
     runs = []
     for f in run_files:
         try:
-            # Extract number from "run_N.f19"
             run_num = int(f.stem.split('_')[1])
             runs.append(run_num)
         except (IndexError, ValueError):
             pass
     
     if runs:
-        print(f"✓ Auto-detected {len(runs)} runs: {runs}")
+        print(f"✓ Auto-detected {len(runs)} runs in {run_mode} mode: {runs}")
         return sorted(runs)
     else:
         print(f"Warning: Could not parse run numbers. Using default runs [1,2,3,4,5]")
@@ -501,35 +689,45 @@ def main():
     )
     
     parser.add_argument('--data-root', type=Path, default=Path('data'),
-                        help='Root directory containing modified/no_modified subdirectories')
-    parser.add_argument('--results-root', type=Path, default=Path('results_integrated'),
+                        help='Root directory containing data files')
+    parser.add_argument('--results-root', type=Path, default=Path('results'),
                         help='Output directory for results')
+    parser.add_argument('--mode', type=str, choices=['comparison', 'single'], default='comparison',
+                        help='Analysis mode: comparison (modified/unmodified) or single (single files)')
     parser.add_argument('--runs', nargs='*', type=int,
-                        help='Run numbers to process (auto-detected from run_*.f19 files if not specified)')
+                        help='Run numbers to process (auto-detected if not specified)')
     parser.add_argument('--workers', type=int, default=1,
                         help='Number of parallel workers')
-    parser.add_argument('--batch-size', type=int, default=50,
+    parser.add_argument('--batch-size', type=int, default=500,
                         help='Events per batch')
     
     args = parser.parse_args()
     
     # Auto-detect runs if not explicitly specified
     if args.runs is None or len(args.runs) == 0:
-        print("Auto-detecting run files from data directory...")
-        args.runs = auto_detect_runs(args.data_root)
+        print(f"Auto-detecting run files from data directory ({args.mode} mode)...")
+        args.runs = auto_detect_runs(args.data_root, run_mode=args.mode)
     else:
         print(f"✓ Using specified runs: {args.runs}")
     
+    # Create output directories
     args.results_root.mkdir(parents=True, exist_ok=True)
-    (args.results_root / "modified").mkdir(exist_ok=True)
-    (args.results_root / "unmodified").mkdir(exist_ok=True)
-    (args.results_root / "comparisons").mkdir(exist_ok=True)
+    
+    if args.mode == "comparison":
+        (args.results_root / "modified").mkdir(exist_ok=True)
+        (args.results_root / "unmodified").mkdir(exist_ok=True)
+        (args.results_root / "comparisons").mkdir(exist_ok=True)
+    else:
+        (args.results_root / "distributions").mkdir(exist_ok=True)
+    
     (args.results_root / "cumulative").mkdir(exist_ok=True)
     (args.results_root / "stats").mkdir(exist_ok=True)
     
+    # Run analysis
     engine = UnifiedAnalysisEngine(
         data_root=args.data_root,
         results_root=args.results_root,
+        run_mode=args.mode,
         n_workers=args.workers,
         batch_size=args.batch_size
     )
@@ -540,10 +738,11 @@ def main():
     engine.generate_report()
     
     print("\n" + "="*80)
-    print("ANALYSIS COMPLETE")
+    print(f"ANALYSIS COMPLETE ({args.mode.upper()} Mode, Thread-Safe, Memory Optimized)")
     print("="*80)
     print(f"Results: {args.results_root}\n")
 
 
 if __name__ == "__main__":
     main()
+
