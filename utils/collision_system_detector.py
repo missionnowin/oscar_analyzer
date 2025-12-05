@@ -1,222 +1,113 @@
-import numpy as np
-from typing import Dict, Tuple
+import sys
+from typing import Dict
+
+
+try:
+    from models.ions import CollisionSystem
+    from models.file_format import FileFormat
+    from utils.parsers.hepmc_parser import HepMCParser
+    from utils.parsers.phqmd_parser import PHQMDParser
+    from utils.parsers.urqmd_parser import UrQMDParser
+except ImportError as e:
+    print(f"Error importing modules: {e}")
+    sys.exit(1)
 
 
 class CollisionSystemDetector:
     @staticmethod
-    def detect_from_file(file_path: str, n_events_sample: int = 100, file_format: str = None) -> Dict:
+    def detect_from_file(file_path: str, 
+                        file_format: str = None) -> Dict:
         """
-        Analyze first N events to infer collision parameters.
-        
+        Detect collision parameters from file header.
+
         Returns:
             {
-                'A1': mass of projectile,
-                'A2': mass of target,
-                'Z1': charge of projectile,
-                'Z2': charge of target,
-                'sqrt_s_NN': estimated collision energy (GeV),
-                'label': human-readable label (e.g., "Au+Au @ 10 GeV"),
-                'confidence': confidence score (0-1)
+                'A1': mass of projectile (A number),
+                'A2': mass of target (A number),
+                'Z1': charge of projectile (atomic number),
+                'Z2': charge of target (atomic number),
+                'sqrt_s_NN': collision energy in GeV,
+                'label': human-readable label (e.g., "Xe-129+Au-197 @ 3.0 GeV"),
+                'confidence': confidence score (0-1),
             }
+
+        Returns None if parsing fails.
         """
         try:
-            from utils.readers.multi_format_detector import MultiFormatReader
-            from utils.readers.reader import ReaderBase
-        except ImportError as e:
-            print(f"Error importing modules: {e}")
-            sys.exit(1)
-        
-        reader: ReaderBase = MultiFormatReader.open(file_path, file_format) 
-        
-        total_particles = 0
-        charge_counts = {}
-        pdgid_counts = {}
-        max_pz_forward = []
-        max_pz_backward = []
-        pz_means = []
-        
-        event_count = 0
-        
-        # Stream batches and sample first n_events_sample events
-        for batch in reader.stream_batch(batch_size=100):
-            for particles in batch:
-                if event_count >= n_events_sample:
-                    break
-                
-                if not particles:
-                    continue
-                
-                total_particles += len(particles)
-                
-                # Count particle types and charges
-                for p in particles:
-                    pdgid = p.particle_id
-                    charge = p.charge
-                    
-                    if pdgid in [2212, 2112]:
-                        charge_counts[charge] = charge_counts.get(charge, 0) + 1
-                    
-                    pdgid_counts[pdgid] = pdgid_counts.get(pdgid, 0) + 1
-                
-                # Track pz distribution
-                pz_vals = [p.pz for p in particles]
-                if pz_vals:
-                    forward = [p for p in pz_vals if p > 0]
-                    backward = [p for p in pz_vals if p < 0]
-                    
-                    if forward:
-                        max_pz_forward.append(max(forward))
-                    if backward:
-                        max_pz_backward.append(min(backward))
-                    
-                    pz_means.append(np.mean(pz_vals))
-                
-                event_count += 1
+            if file_format:
+                fmt = FileFormat[file_format.upper()]
+            else:
+                fmt = CollisionSystemDetector._detect_format(file_path)
             
-            if event_count >= n_events_sample:
-                break
+            if fmt == FileFormat.UNKNOWN:
+                return None
+            
+            # Route to appropriate parser
+            parsers = {
+                FileFormat.URQMD: UrQMDParser.parse_urqmd_file,
+                FileFormat.PHQMD: PHQMDParser.parse_phqmd_file,
+                FileFormat.HEPMC2: HepMCParser.parse_hepmc_file,
+                FileFormat.HEPMC3: HepMCParser.parse_hepmc_file,
+            }
+            
+            parser = parsers.get(fmt)
+            
+            if not parser:
+                return None
+            
+            collision_system = parser(file_path, fmt)
+
+
+            if collision_system:
+                result = CollisionSystemDetector._collision_system_to_dict(collision_system)
+                result['format'] = fmt.value
+                return result
+            
+        except Exception:
+            return None
         
-        # Infer collision parameters
-        A1, Z1, A2, Z2 = CollisionSystemDetector._infer_nuclei(
-            charge_counts, pdgid_counts, total_particles, event_count
-        )
-        
-        sqrt_s_NN = CollisionSystemDetector._infer_energy(
-            max_pz_forward, max_pz_backward, pz_means
-        )
-        
-        label = f"{CollisionSystemDetector._nucleus_name(Z1, A1)}+"
-        label += f"{CollisionSystemDetector._nucleus_name(Z2, A2)} @ {sqrt_s_NN:.1f} GeV"
-        
-        confidence = CollisionSystemDetector._assess_confidence(
-            charge_counts, pdgid_counts, total_particles, event_count
-        )
-        
+        return None
+
+    @staticmethod
+    def _detect_format(file_path: str) -> FileFormat:
+        try:
+            with open(file_path, 'rb') as f:
+                header = f.read(4096)  # Read first 4KB
+            
+            # Check HepMC3 first (most specific)
+            if b'HepMC3' in header or b'# PYTHIA EVENT FILE' in header:
+                return FileFormat.HEPMC3
+            
+            # Check HepMC2
+            if b'HepMC::' in header or (b'E ' in header and b'V ' in header):
+                return FileFormat.HEPMC2
+            
+            # Check PHQMD
+            if b'PHQMD' in header:
+                return FileFormat.PHQMD
+            
+            # Check UrQMD (most common, check last)
+            if b'UrQMD' in header or b'OSCAR' in header or b'final_id_p_x' in header:
+                return FileFormat.URQMD
+            
+            return FileFormat.UNKNOWN
+            
+        except Exception as e:
+            print(f"Error detecting format: {e}")
+            return FileFormat.UNKNOWN
+
+    @staticmethod
+    def _collision_system_to_dict(sys: CollisionSystem) -> Dict:
         return {
-            'A1': A1,
-            'A2': A2,
-            'Z1': Z1,
-            'Z2': Z2,
-            'sqrt_s_NN': sqrt_s_NN,
-            'label': label,
-            'confidence': confidence,
-            'n_events_analyzed': event_count,
-            'n_particles_total': total_particles,
-            'avg_particles_per_event': total_particles / event_count if event_count > 0 else 0
+            'A1': sys.projectile.A,
+            'A2': sys.target.A,
+            'Z1': sys.projectile.Z,
+            'Z2': sys.target.Z,
+            'sqrt_s_NN': sys.collision_energy,
+            'label': sys.label,
+            'projectile_name': sys.projectile.name,
+            'target_name': sys.target.name,
+            'confidence': 1.0,
         }
-    
-    @staticmethod
-    def _infer_nuclei(charge_counts: Dict, pdgid_counts: Dict, 
-                      total_particles: int, n_events: int) -> Tuple[int, int, int, int]:
-        """Infer nucleus identity from charge distribution."""
-        avg_per_event = total_particles / n_events if n_events > 0 else 0
-        
-        # Match based on average multiplicity
-        if avg_per_event > 500:
-            return 197, 79, 197, 79  # Au+Au
-        elif avg_per_event > 200:
-            return 207, 82, 207, 82  # Pb+Pb
-        elif avg_per_event > 100:
-            return 63, 29, 63, 29    # Cu+Cu
-        elif avg_per_event > 50:
-            return 1, 1, 197, 79     # p+Au
-        else:
-            return 197, 79, 197, 79  # Default: Au+Au
-    
-    @staticmethod
-    def _infer_energy(max_pz_forward: list, max_pz_backward: list, 
-                     pz_means: list) -> float:
-        """Infer collision energy from pz distribution."""
-        if not max_pz_forward or not max_pz_backward:
-            return 10.0
-        
-        avg_max_pz_fwd = np.mean(max_pz_forward)
-        avg_max_pz_bwd = np.mean([abs(p) for p in max_pz_backward if p < 0])
-        estimated_max_pz = max(avg_max_pz_fwd, avg_max_pz_bwd)
-        
-        # Energy estimation from pz
-        if estimated_max_pz < 2:
-            return 5.0
-        elif estimated_max_pz < 5:
-            return 10.0
-        elif estimated_max_pz < 10:
-            return 20.0
-        elif estimated_max_pz < 50:
-            return 50.0
-        elif estimated_max_pz < 100:
-            return 200.0
-        else:
-            return 2760.0
-    
-    @staticmethod
-    def _nucleus_name(Z: int, A: int) -> str:
-        """Convert Z, A to nucleus name."""
-        names = {
-            (1, 1): 'p',
-            (0, 1): 'n',
-            (1, 2): 'd',
-            (2, 3): '³He',
-            (2, 4): '⁴He',
-            (6, 12): '¹²C',
-            (8, 16): '¹⁶O',
-            (29, 63): 'Cu',
-            (79, 197): 'Au',
-            (82, 207): 'Pb',
-            (92, 238): 'U',
-        }
-        
-        if (Z, A) in names:
-            return names[(Z, A)]
-        
-        elements = {
-            1: 'H', 2: 'He', 6: 'C', 8: 'O', 29: 'Cu', 79: 'Au', 82: 'Pb', 92: 'U'
-        }
-        elem = elements.get(Z, f'Z{Z}')
-        return f'{elem}({A})'
-    
-    @staticmethod
-    def _assess_confidence(charge_counts: Dict, pdgid_counts: Dict,
-                          total_particles: int, n_events: int) -> float:
-        """Assess confidence in system detection (0-1)."""
-        confidence = 0.5
-        
-        if n_events >= 100:
-            confidence += 0.2
-        elif n_events >= 50:
-            confidence += 0.1
-        
-        if total_particles > 10000:
-            confidence += 0.2
-        elif total_particles > 5000:
-            confidence += 0.1
-        
-        if len(pdgid_counts) < 20:
-            confidence += 0.1
-        
-        return min(confidence, 1.0)
 
-
-if __name__ == '__main__':
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage: python collision_system_detector.py <path_to_file.f19>")
-        sys.exit(1)
-    
-    file_path = sys.argv[1]
-    
-    print(f"\nAnalyzing: {file_path}")
-    print("="*80)
-    
-    result = CollisionSystemDetector.detect_from_file(file_path, n_events_sample=100)
-    
-    if result:
-        print(f"\nDetected Collision System:")
-        print(f"  Label: {result['label']}")
-        print(f"  Projectile: {CollisionSystemDetector._nucleus_name(result['Z1'], result['A1'])} (Z={result['Z1']}, A={result['A1']})")
-        print(f"  Target: {CollisionSystemDetector._nucleus_name(result['Z2'], result['A2'])} (Z={result['Z2']}, A={result['A2']})")
-        print(f"  Energy: sqrt(s_NN) = {result['sqrt_s_NN']:.1f} GeV")
-        print(f"  Confidence: {result['confidence']:.1%}")
-        print(f"  Events analyzed: {result['n_events_analyzed']}")
-        print(f"  Avg particles/event: {result['avg_particles_per_event']:.0f}")
-        print("="*80 + "\n")
+   

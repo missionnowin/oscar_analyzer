@@ -10,8 +10,6 @@ import multiprocessing as mp
 import argparse
 import gc
 
-from models.cumulative_singnature import CumulativeSignature
-
 
 try:
     from analyzers.general.comparison_analyzer import RunComparisonAnalyzer
@@ -38,7 +36,7 @@ class UnifiedAnalysisEngine:
     """
     
     def __init__(self, data_root: Path, results_root: Path, run_mode: str = "comparison", 
-                 file_format: str = 'oscar', n_workers: Optional[int] = None, batch_size: int = 500):
+                 file_format: str = None, n_workers: Optional[int] = None, batch_size: int = 500):
         self.data_root = Path(data_root)
         self.results_root = Path(results_root)
         self.run_mode = run_mode  # 'comparison' or 'single'
@@ -63,7 +61,7 @@ class UnifiedAnalysisEngine:
         # Detect collision system from file if not provided
         if system_info is None:
             system_info = CollisionSystemDetector.detect_from_file(
-                str(file_path), n_events_sample=10, file_format=self.file_format
+                str(file_path), file_format=self.file_format
             )
             if not system_info:
                 system_info = {}
@@ -118,7 +116,7 @@ class UnifiedAnalysisEngine:
         # Detect collision system from file if not provided
         if system_info is None:
             system_info = CollisionSystemDetector.detect_from_file(
-                str(file_mod), n_events_sample=10, file_format=self.file_format
+                str(file_mod), file_format=self.file_format
             )
             if not system_info:
                 system_info = {}
